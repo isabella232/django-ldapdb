@@ -179,3 +179,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
             if dn is not None:
                 output.append((dn.decode(self.charset), attrs))
         return output
+
+    def passwd_s(self, dn, oldpw, newpw):
+        cursor = self._cursor()
+        return cursor.connection.passwd_s(dn.encode(self.charset), oldpw, newpw)

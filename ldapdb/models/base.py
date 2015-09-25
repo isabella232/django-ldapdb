@@ -37,6 +37,8 @@ import django.db.models
 from django.db import connections, router
 from django.db.models import signals
 
+from .fields import PasswordField
+
 import ldapdb  # noqa
 
 
@@ -88,7 +90,8 @@ class Model(django.db.models.base.Model):
         connection.delete_s(self.dn)
         signals.post_delete.send(sender=self.__class__, instance=self)
 
-    def save(self, using=None):
+    def save(self, force_insert=False, force_update=False, using=None,
+             update_fields=None):
         """
         Saves the current instance.
         """
@@ -120,21 +123,28 @@ class Model(django.db.models.base.Model):
             # update an existing entry
             record_exists = True
             modlist = []
+            pw = None
             orig = self.__class__.objects.using(using).get(pk=self.saved_pk)
             for field in self._meta.fields:
                 if not field.db_column:
                     continue
-                old_value = getattr(orig, field.name, None)
-                new_value = getattr(self, field.name, None)
-                if old_value != new_value:
-                    new_value = field.get_db_prep_save(new_value, 
-                                        connection=connection)
-                    if new_value:
-                        modlist.append((ldap.MOD_REPLACE, field.db_column, 
-                                        new_value))
-                    elif old_value:
-                        modlist.append((ldap.MOD_DELETE, field.db_column,
-                                        None))
+                else:
+                    old_value = getattr(orig, field.name, None)
+                    new_value = getattr(self, field.name, None)
+                    if old_value != new_value:
+
+                        new_value = field.get_db_prep_save(new_value, 
+                                                connection=connection)
+
+                        # Check to see if we have a password field
+                        if type(field) == PasswordField:
+                            pw = new_value
+                        elif new_value:
+                            modlist.append((ldap.MOD_REPLACE, field.db_column, 
+                                                new_value))
+                        elif old_value:
+                            modlist.append((ldap.MOD_DELETE, field.db_column,
+                                                None))
 
             if len(modlist):
                 # handle renaming
@@ -150,6 +160,11 @@ class Model(django.db.models.base.Model):
             else:
                 logger.debug("No changes to be saved to LDAP entry %s" %
                              self.dn)
+
+            # Change the user's password if necessary
+            if pw != None:
+                connection.passwd_s(self.dn, None, pw)
+
 
         # done
         self.saved_pk = self.pk

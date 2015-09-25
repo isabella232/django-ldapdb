@@ -34,7 +34,7 @@ from django.db.models import fields, SubfieldBase
 
 from ldapdb import escape_ldap_filter
 
-import datetime
+import datetime, pytz
 
 
 class CharField(fields.CharField):
@@ -46,8 +46,10 @@ class CharField(fields.CharField):
     def from_ldap(self, value, connection):
         if len(value) == 0:
             return ''
-        else:
+        elif hasattr(connection, 'charset'):
             return value[0].decode(connection.charset)
+        else:
+            return value[0].decode('utf-8')
 
     def get_db_prep_lookup(self, lookup_type, value, connection,
                            prepared=False):
@@ -58,7 +60,7 @@ class CharField(fields.CharField):
             return ["%s*" % escape_ldap_filter(value)]
         elif lookup_type in ['contains', 'icontains']:
             return ["*%s*" % escape_ldap_filter(value)]
-        elif lookup_type == 'exact':
+        elif lookup_type in ['exact', 'iexact']:
             return [escape_ldap_filter(value)]
         elif lookup_type == 'in':
             return [escape_ldap_filter(v) for v in value]
@@ -68,7 +70,10 @@ class CharField(fields.CharField):
     def get_db_prep_save(self, value, connection):
         if not value:
             return None
-        return [value.encode(connection.charset)]
+        if hasattr(connection, 'charset'):
+            return [value.encode(connection.charset)]
+        else:
+            return value
 
     def get_prep_lookup(self, lookup_type, value):
         "Perform preliminary non-db specific lookup checks and conversions"
@@ -78,12 +83,66 @@ class CharField(fields.CharField):
             return "%s*" % escape_ldap_filter(value)
         elif lookup_type in ['contains', 'icontains']:
             return "*%s*" % escape_ldap_filter(value)
-        elif lookup_type == 'exact':
+        elif lookup_type in ['exact', 'iexact']:
             return escape_ldap_filter(value)
         elif lookup_type == 'in':
             return [escape_ldap_filter(v) for v in value]
 
         raise TypeError("CharField has invalid lookup: %s" % lookup_type)
+
+
+class PasswordField(fields.CharField):
+    def __init__(self, *args, **kwargs):
+        defaults = {'max_length': 200}
+        defaults.update(kwargs)
+        super(PasswordField, self).__init__(*args, **defaults)
+
+    def from_ldap(self, value, connection):
+        if len(value) == 0:
+            return ''
+        elif hasattr(connection, 'charset'):
+            return value[0].decode(connection.charset)
+        else:
+            return value[0].decode('utf-8')
+
+    def get_db_prep_lookup(self, lookup_type, value, connection,
+                           prepared=False):
+        "Returns field's value prepared for database lookup."
+        if lookup_type == 'endswith':
+            return ["*%s" % escape_ldap_filter(value)]
+        elif lookup_type == 'startswith':
+            return ["%s*" % escape_ldap_filter(value)]
+        elif lookup_type in ['contains', 'icontains']:
+            return ["*%s*" % escape_ldap_filter(value)]
+        elif lookup_type in ['exact', 'iexact']:
+            return [escape_ldap_filter(value)]
+        elif lookup_type == 'in':
+            return [escape_ldap_filter(v) for v in value]
+
+        raise TypeError("PasswordField has invalid lookup: %s" % lookup_type)
+
+    def get_db_prep_save(self, value, connection):
+        if not value:
+            return None
+        if hasattr(connection, 'charset'):
+            return value.encode(connection.charset)
+        else:
+            return value
+
+    def get_prep_lookup(self, lookup_type, value):
+        "Perform preliminary non-db specific lookup checks and conversions"
+        if lookup_type == 'endswith':
+            return "*%s" % escape_ldap_filter(value)
+        elif lookup_type == 'startswith':
+            return "%s*" % escape_ldap_filter(value)
+        elif lookup_type in ['contains', 'icontains']:
+            return "*%s*" % escape_ldap_filter(value)
+        elif lookup_type in ['exact', 'iexact']:
+            return escape_ldap_filter(value)
+        elif lookup_type == 'in':
+            return [escape_ldap_filter(v) for v in value]
+
+        raise TypeError("PasswordField has invalid lookup: %s" % lookup_type)
 
 
 class ImageField(fields.Field):
@@ -130,6 +189,30 @@ class IntegerField(fields.IntegerField):
         if lookup_type in ('exact', 'gte', 'lte'):
             return value
         raise TypeError("IntegerField has invalid lookup: %s" % lookup_type)
+
+
+class BooleanField(fields.BooleanField):
+    def from_ldap(self, value, connection):
+        if len(value) == 0:
+            return False
+        else:
+            return bool(value[0])
+
+    def get_db_prep_lookup(self, lookup_type, value, connection,
+                           prepared=False):
+        "Returns field's value prepared for database lookup."
+        return [self.get_prep_lookup(lookup_type, value)]
+
+    def get_db_prep_save(self, value, connection):
+        if value is None:
+            return None
+        return [str(value)]
+
+    def get_prep_lookup(self, lookup_type, value):
+        "Perform preliminary non-db specific lookup checks and conversions"
+        if lookup_type in ('exact',):
+            return value
+        raise TypeError("BooleanField has invalid lookup: %s" % lookup_type)
 
 
 class FloatField(fields.FloatField):
@@ -229,3 +312,49 @@ class DateField(fields.DateField):
         if lookup_type in ('exact',):
             return value
         raise TypeError("DateField has invalid lookup: %s" % lookup_type)
+
+
+class DateTimeField(fields.DateTimeField):
+    """
+    A text field containing date, in specified format.
+    The format can be specified as 'format' argument, as strptime()
+    format string. It defaults to ISO8601 (%Y-%m-%d).
+
+    Note: 'lte' and 'gte' lookups are done string-wise. Therefore,
+    they will onlywork correctly on Y-m-d dates with constant
+    component widths.
+    """
+
+    def __init__(self, *args, **kwargs):
+        if 'format' in kwargs:
+            self._date_format = kwargs.pop('format')
+        else:
+            self._date_format = '%Y-%m-%d %H:%M:%S'
+        super(DateTimeField, self).__init__(*args, **kwargs)
+
+    def from_ldap(self, value, connection):
+        if len(value) == 0:
+            return None
+        else:
+            return datetime.datetime.strptime(value[0],
+                                              self._date_format).replace(tzinfo=pytz.utc)
+
+    def get_db_prep_lookup(self, lookup_type, value, connection,
+                           prepared=False):
+        "Returns field's value prepared for database lookup."
+        return self.get_prep_lookup(lookup_type, value)
+
+    def get_db_prep_save(self, value, connection):
+        if not value:
+            return None
+        if not isinstance(value, datetime.datetime):
+            raise ValueError(
+                'DateTimeField can be only set to a datetime.datetime instance')
+
+        return value.strftime(self._date_format)
+
+    def get_prep_lookup(self, lookup_type, value):
+        "Perform preliminary non-db specific lookup checks and conversions"
+        if lookup_type in ('exact',):
+            return value
+        raise TypeError("DateTimeField has invalid lookup: %s" % lookup_type)
