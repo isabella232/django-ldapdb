@@ -34,7 +34,7 @@ from django.db.models import fields, SubfieldBase
 
 from ldapdb import escape_ldap_filter
 
-import datetime, pytz
+import datetime, pytz, re
 
 
 class CharField(fields.CharField):
@@ -358,3 +358,125 @@ class DateTimeField(fields.DateTimeField):
         if lookup_type in ('exact',):
             return value
         raise TypeError("DateTimeField has invalid lookup: %s" % lookup_type)
+
+class GeneralizedTimeField(fields.DateTimeField):
+    """
+    Handle the Generalized Time format (SYNTAX OID 1.3.6.1.4.1.1466.115.121.1.24)
+    In ABNF:
+    GeneralizedTime = century year month day hour
+                           [ minute [ second / leap-second ] ]
+                           [ fraction ]
+                           g-time-zone
+
+      century = 2(%x30-39) ; "00" to "99"
+      year    = 2(%x30-39) ; "00" to "99"
+      month   =   ( %x30 %x31-39 ) ; "01" (January) to "09"
+                / ( %x31 %x30-32 ) ; "10" to "12"
+      day     =   ( %x30 %x31-39 )    ; "01" to "09"
+                / ( %x31-32 %x30-39 ) ; "10" to "29"
+                / ( %x33 %x30-31 )    ; "30" to "31"
+      hour    = ( %x30-31 %x30-39 ) / ( %x32 %x30-33 ) ; "00" to "23"
+      minute  = %x30-35 %x30-39                        ; "00" to "59"
+
+      second      = ( %x30-35 %x30-39 ) ; "00" to "59"
+      leap-second = ( %x36 %x30 )       ; "60"
+
+      fraction        = ( DOT / COMMA ) 1*(%x30-39)
+      g-time-zone     = %x5A  ; "Z"
+                        / g-differential
+      g-differential  = ( MINUS / PLUS ) hour [ minute ]
+      MINUS           = %x2D  ; minus sign ("-")
+    """
+    _match_pattern = r"""
+        (?P<year>[0-9]{4})			# 4 digit year
+	(?P<month>(0[1-9])|(1[012]))		# 2 digit month (01-12))
+	(?P<day>0[1-9]|[12][0-9]|3[01])		# 2 digit day (01-31)
+	(?P<hour>[01][0-9]|2[0-3])		# 2 digit hour (00-23)
+	((?P<minute>[0-5][0-9])?		# 2 digit minute (00-59)
+	(?P<second>[0-5][0-9]|60)?)?		# 2 digit second/leap second (00-60)
+	(?P<fraction>[,.][0-9]+)?		# Optional fractional offset
+	(?P<tz>Z|[+-][0-5][0-9]([0-5][0-9])?)	# Timezone, either Z (UTC) or +/- offset
+	"""
+
+    def __init__(self, *args, **kwargs):
+        if 'format' in kwargs:
+            self._date_format = kwargs.pop('format')
+	else:
+	    self._date_format = '%Y%m%d%H%M%SZ'
+        super(GeneralizedTimeField, self).__init__(*args, **kwargs)
+
+    def from_ldap(self, value, connection):
+        if len(value) == 0:
+            return None
+        else:
+	    result = re.match(self._match_pattern, value[0], re.VERBOSE)
+	    if not result:
+	        return None
+	    else:
+	        # Build a datetime from the components
+		year = int(result.group('year'))
+		month = int(result.group('month'))
+		day = int(result.group('day'))
+		hour = int(result.group('hour'))
+		fraction = 'hour'
+		if result.group('minute'):
+		  minute = int(result.group('minute'))
+		  fraction = 'minute'
+		else:
+		  minute = 0;
+		if result.group('second'):
+		  second = int(result.group('second'))
+		  fraction = 'second'
+		else:
+		  second = 0;
+		if result.group('fraction'):
+		  frac_part = result.group('fraction')[1:] # get rid of initial comma/dot
+		  frac = float("0." + frac_part)
+		  if fraction == 'hour':
+		    mins = frac * 60
+		    minute = int(mins)
+		    secs = (mins - minute) * 60
+		    second = int(secs)
+		    micros = (secs - second) * 1000000
+		    microsecond = int(micros)
+		  elif fraction == 'minute':
+		    secs = frac * 60
+		    second = int(secs)
+		    micros = (secs - second) * 1000000
+		    microsecond = int(micros)
+		else:
+		  microsecond = 0
+
+		tzstr = result.group('tz')
+		if tzstr == 'Z':
+		  tz = pytz.utc
+		else:
+		  sign = tzstr[0]
+		  hr_part = int(tzstr[1:2])
+		  mn_part = int(tzstr[3:])
+		  offset = hr_part * 60 + mn_part
+		  if sign == '-':
+		    offset = 0 - offset
+		  tz = pytz.FixedOffset(offset)
+
+		return datetime.datetime(year, month, day, hour, minute, second, microsecond).replace(tzinfo=pytz.utc);
+
+    def get_db_prep_lookup(self, lookup_type, value, connection,
+                           prepared=False):
+        "Returns field's value prepared for database lookup."
+        return self.get_prep_lookup(lookup_type, value)
+
+    def get_db_prep_save(self, value, connection):
+        if not value:
+            return None
+        if not isinstance(value, datetime.datetime):
+            raise ValueError(
+                'GeneralizedTimeField can be only set to a datetime.datetime instance')
+
+        return value.strftime(self._save_format)
+
+    def get_prep_lookup(self, lookup_type, value):
+        "Perform preliminary non-db specific lookup checks and conversions"
+        if lookup_type in ('exact',):
+            return value
+        raise TypeError("GeneralizedTimeField has invalid lookup: %s" % lookup_type)

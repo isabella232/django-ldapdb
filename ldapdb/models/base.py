@@ -188,5 +188,13 @@ class Model(django.db.models.base.Model):
             'Meta': Meta})
         return new_class
 
+    @classmethod
+    def check(cls, **kwargs):
+	"""
+	Need to bypass field checks until we can determine why django
+	insists on using the default backend for them
+	"""
+	return []
+
     class Meta:
         abstract = True
